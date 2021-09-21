@@ -17,30 +17,25 @@ BARCODE_TYPE = {
     "UPC_EAN_EXTENSION": cv2.barcode.UPC_EAN_EXTENSION,
 }
 
-class Visualizer(threading.Thread):
-    def __init__(self, owner):
-        super(Visualizer, self).__init__()
-        self.owner = owner
-        self.timestamp = None
-        self.current_timestamp = None
-        self.image = None
-        self.terminated = False
-        self.start()
-
-    def run(self):
-        while not self.terminated:
-            if self.timestamp:
-                if self.current_timestamp:
-                    if self.timestamp > self.current_timestamp:
-                        cv2.imshow("Frame", self.image)
-                        self.current_timestamp = self.timestamp
-                else:
-                    self.current_timestamp = self.timestamp
-            if cv2.waitKey(33) == 27:
-                self.terminated = True
-        self.owner.done = True
-
 class Barcode:
+    """
+    A class used to represent a barcode.
+
+    Attributes
+    ----------
+    info : str
+        decoded barcode value
+    type : int
+        a type of barcode (e.g. EAN-13)
+    points : numpy.array
+        vertices of barcode rectangle
+
+    Methods
+    -------
+    Draw(image)
+        Draws barcode's rectangle and its value to the given image.
+    """
+
     def __init__(self, binfo, btype, points):
         self.info = binfo
         self.type = btype
@@ -56,13 +51,49 @@ class Barcode:
         cv2.putText(image, "{}".format(self.info), p2, cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 0, 0), 1, cv2.LINE_AA)
 
 class ImageProcessor(threading.Thread):
+    """
+    Thread that detects and decodes barcodes in a given image.
+
+    Attributes
+    ----------
+        stream
+            A byte stream that holds the image data.
+        event
+            A threading event that is set when the whole frame is available and which starts
+            the image processing.
+        terminated
+            A flag that signifies the termination of the image processing thread.
+        owner
+            An objects that spawns and owns the image processing thread.
+        barcodes
+            A list of barcode objects.
+        done
+            A flag that signifies the end of the processing of the current image.
+        image
+            An image that is currently processed.
+        timestamp
+            A timestamp of the currently processed image.
+        frame
+            A frame sequence number.
+        detector
+            An instance of a barcode detector.
+
+    Method
+    ------
+        run()
+            Image processing main loop in which the thread wait for the whole frame to be read and
+            then it detects and decodes the barcodes in it.
+        reset()
+            Resets the state of the thread.
+    """
+
     def __init__(self, owner):
         super(ImageProcessor, self).__init__()
         self.stream = io.BytesIO()
         self.event = threading.Event()
         self.terminated = False
         self.owner = owner
-        self.Reset()
+        self.reset()
         self.start()
 
     def run(self):
@@ -87,7 +118,7 @@ class ImageProcessor(threading.Thread):
                         self.done = True
                         self.owner.pool.append(self)
     
-    def Reset(self):
+    def reset(self):
         self.done = False
         self.image = None
         self.timestamp = None
@@ -96,6 +127,40 @@ class ImageProcessor(threading.Thread):
         self.barcodes = []
 
 class ProcessOutput(object):
+    """
+    Handles frame readout and work distribution among threads.
+
+    Attributes
+    ----------
+        done
+            A flag that signifies the end of the processing.
+        lock
+            A threading lock used for synchronization.
+        pool
+            A pool of available image processing workers.
+        processor
+            An image processing worker that currently waits for a whole frame to be read.
+        frame
+            A frame counter.
+        args
+            A parsed command line arguments.
+        visualizer
+            A visualization thread.
+
+    Methods
+    -------
+        print_result(processor)
+            Prints the results of the worker that has finished the image processing.
+        show_result(processor)
+            Visualizes the results of the worker that has finished the image processing.
+        store_result(processor)
+            Stores the results of the worker that has finished the image processing.
+        write(buf)
+            Reads the frame from the camera and assigns it to the available worker.
+        flush()
+            Shuts down in an orderly fashion.
+    """
+
     def __init__(self, args):
         self.done = False
         # Construct a pool of image processors along with a lock
@@ -109,19 +174,19 @@ class ProcessOutput(object):
         if self.args.visualize:
             self.visualizer = Visualizer(self)
 
-    def PrintResult(self, processor):
+    def print_result(self, processor):
         # assert(processor.done)
         print(processor.timestamp, processor.frame, end=" ")
         for barcode in processor.barcodes:
             print(barcode)
         print(flush=True)
 
-    def ShowResult(self, processor):
+    def show_result(self, processor):
         # assert(processor.done)
         self.visualizer.timestamp = processor.timestamp
         self.visualizer.image = processor.image
 
-    def StoreResult(self, processor):
+    def store_result(self, processor):
         # assert(processor.done)
         dirName = "barcode"
 
@@ -144,12 +209,12 @@ class ProcessOutput(object):
                             for barcode in self.pool[-1].barcodes:
                                 barcode.Draw(self.pool[-1].image)
                         if self.args.print_results:
-                            self.PrintResult(self.pool[-1])
+                            self.print_result(self.pool[-1])
                         if self.args.visualize:
-                            self.ShowResult(self.pool[-1])
+                            self.show_result(self.pool[-1])
                         if self.args.store:
-                            self.StoreResult(self.pool[-1])
-                        self.pool[-1].Reset()
+                            self.store_result(self.pool[-1])
+                        self.pool[-1].reset()
                     self.processor = self.pool.pop()
                     self.processor.frame = self.frame
                     self.processor.timestamp = timestamp
@@ -163,7 +228,7 @@ class ProcessOutput(object):
         if self.processor:
             self.processor.stream.write(buf)
 
-    def Flush(self):
+    def flush(self):
         # When told to flush (this indicates end of recording), shut
         # down in an orderly fashion. First, add the current processor
         # back to the pool
@@ -190,7 +255,56 @@ class ProcessOutput(object):
             proc.terminated = True
             proc.join()
 
+class Visualizer(threading.Thread):
+    """
+    Thread that shows images with drawn barcode rectangles and values.
+
+    Attributes
+    ----------
+        owner
+            An object that spawn and owns the visualization thread.
+        timestamp
+            A timestamp of an image that is to be shown.
+        current_timestamp
+            A timestamp of an image that is currently shown.
+        image
+            An image that is to be shown.
+        terminated
+            A flag that signifies the termination of the visualization thread.
+
+    Methods
+    -------
+        run()
+            Visualization main loop that shows the given image if its timestamp
+            is greater than the timestamp of currently shown image. This loop is
+            terminated when ESC is pressed.
+    """
+
+    def __init__(self, owner):
+        super(Visualizer, self).__init__()
+        self.owner = owner
+        self.timestamp = None
+        self.current_timestamp = None
+        self.image = None
+        self.terminated = False
+        self.start()
+
+    def run(self):
+        while not self.terminated:
+            if self.timestamp:
+                if self.current_timestamp:
+                    if self.timestamp > self.current_timestamp:
+                        cv2.imshow("Frame", self.image)
+                        self.current_timestamp = self.timestamp
+                else:
+                    self.current_timestamp = self.timestamp
+            if cv2.waitKey(33) == 27:
+                self.terminated = True
+        self.owner.done = True
+
 def ParseCommandLineArguments():
+    """ Parses command line arguments. """
+
     parser = argparse.ArgumentParser(description='Detects barcodes and decodes their values.')
     parser.add_argument('-n', '--num-threads', default=1, type=int)
     parser.add_argument('-p', '--print-results', action='store_const', const=True, default=False)
@@ -214,5 +328,5 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             pass
         camera.stop_recording()
-        output.Flush()
+        output.flush()
 
