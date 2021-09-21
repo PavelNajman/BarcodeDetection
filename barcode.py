@@ -3,7 +3,6 @@ import os
 import cv2
 import sys
 import time
-import pickle
 import argparse
 import picamera
 import threading
@@ -17,11 +16,6 @@ BARCODE_TYPE = {
     "UPC_E": cv2.barcode.UPC_E,
     "UPC_EAN_EXTENSION": cv2.barcode.UPC_EAN_EXTENSION,
 }
-
-def LoadCalibration(filename):
-    with open(filename, "rb") as f:
-        obj = pickle.load(f)
-    return obj["width"], obj["height"], obj["camera_matrix"], obj["distortion_coeffs"]
 
 class Visualizer(threading.Thread):
     def __init__(self, owner):
@@ -62,13 +56,12 @@ class Barcode:
         cv2.putText(image, "{}".format(self.info), p2, cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 0, 0), 1, cv2.LINE_AA)
 
 class ImageProcessor(threading.Thread):
-    def __init__(self, owner, args):
+    def __init__(self, owner):
         super(ImageProcessor, self).__init__()
         self.stream = io.BytesIO()
         self.event = threading.Event()
         self.terminated = False
         self.owner = owner
-        _, _, self.camera_matrix, self.distortion_coeffs = LoadCalibration(args.camera_calibration)
         self.Reset()
         self.start()
 
@@ -108,7 +101,7 @@ class ProcessOutput(object):
         # Construct a pool of image processors along with a lock
         # to control access between threads
         self.lock = threading.Lock()
-        self.pool = [ImageProcessor(self, args) for i in range(args.num_threads)]
+        self.pool = [ImageProcessor(self) for i in range(args.num_threads)]
         self.processor = None
         self.frame = 0
 
@@ -139,8 +132,7 @@ class ProcessOutput(object):
 
     def write(self, buf):
         if buf.startswith(b'\xff\xd8'):
-            # New frame; set the current processor going and grab
-            # a spare one
+            # New frame; set the current processor going and grab a spare one
             self.frame += 1
             timestamp = str(round(time.time() * 1000))
             if self.processor:
@@ -204,14 +196,15 @@ def ParseCommandLineArguments():
     parser.add_argument('-p', '--print-results', action='store_const', const=True, default=False)
     parser.add_argument('-v', '--visualize', action='store_const', const=True, default=False)
     parser.add_argument('-s', '--store', action='store_const', const=True, default=False)
-    parser.add_argument('-c', '--camera-calibration', default="camera_calibration.p", type=str)
+    parser.add_argument('-iw', '--image-width', default=640, type=int)
+    parser.add_argument('-ih', '--image-height', default=480, type=int)
+    parser.add_argument('-f', '--fps', default=30, type=int)
     return parser.parse_args(sys.argv[1:])
 
 if __name__ == "__main__":
     args = ParseCommandLineArguments()
-    width, height, _, _ = LoadCalibration(args.camera_calibration)
 
-    with picamera.PiCamera(resolution=(width, height), framerate=30) as camera:
+    with picamera.PiCamera(resolution=(args.image_width, args.image_height), framerate=args.fps) as camera:
         time.sleep(2)
         output = ProcessOutput(args)
         camera.start_recording(output, format='mjpeg')
