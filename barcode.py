@@ -1,21 +1,10 @@
-import io
 import os
 import cv2
 import sys
 import time
 import argparse
-import picamera
 import threading
 import numpy as np
-
-BARCODE_TYPE = {
-    "NONE": cv2.barcode.NONE,
-    "EAN_8" : cv2.barcode.EAN_8,
-    "EAN_13": cv2.barcode.EAN_13,
-    "UPC_A": cv2.barcode.UPC_A,
-    "UPC_E": cv2.barcode.UPC_E,
-    "UPC_EAN_EXTENSION": cv2.barcode.UPC_EAN_EXTENSION,
-}
 
 class Barcode:
     """
@@ -56,8 +45,6 @@ class ImageProcessor(threading.Thread):
 
     Attributes
     ----------
-        stream
-            A byte stream that holds the image data.
         event
             A threading event that is set when the whole frame is available and which starts
             the image processing.
@@ -89,7 +76,6 @@ class ImageProcessor(threading.Thread):
 
     def __init__(self, owner):
         super(ImageProcessor, self).__init__()
-        self.stream = io.BytesIO()
         self.event = threading.Event()
         self.terminated = False
         self.owner = owner
@@ -99,25 +85,21 @@ class ImageProcessor(threading.Thread):
     def run(self):
         # This method runs in a separate thread
         while not self.terminated:
-            # Wait for an image to be written to the stream
+            # Wait for a new frame
             if self.event.wait(1):
                 try:
-                    self.stream.seek(0)
-                    self.image = cv2.imdecode(np.frombuffer(self.stream.getvalue(), dtype=np.uint8), cv2.IMREAD_COLOR)
                     retval, decoded_info, decoded_type, points = self.detector.detectAndDecode(self.image)
                     if retval:
                         for binfo, btype, brect in zip(decoded_info, decoded_type, points):
                             self.barcodes.append(Barcode(binfo, btype, brect))
                 finally:
                     # Reset the stream and event
-                    self.stream.seek(0)
-                    self.stream.truncate()
                     self.event.clear()
                     # Return ourselves to the available pool
                     with self.owner.lock:
                         self.done = True
                         self.owner.pool.append(self)
-    
+
     def reset(self):
         self.done = False
         self.image = None
@@ -155,8 +137,8 @@ class ProcessOutput(object):
             Visualizes the results of the worker that has finished the image processing.
         store_result(processor)
             Stores the results of the worker that has finished the image processing.
-        write(buf)
-            Reads the frame from the camera and assigns it to the available worker.
+        new_frame(frame)
+            Assigns the new frame to the available worker and processes the worker results.
         flush()
             Shuts down in an orderly fashion.
     """
@@ -195,38 +177,31 @@ class ProcessOutput(object):
 
         cv2.imwrite("{}/{}_{}.jpg".format(dirName, processor.timestamp, processor.frame), processor.image)
 
-    def write(self, buf):
-        if buf.startswith(b'\xff\xd8'):
-            # New frame; set the current processor going and grab a spare one
-            self.frame += 1
-            timestamp = str(round(time.time() * 1000))
-            if self.processor:
-                self.processor.event.set()
-            with self.lock:
-                if self.pool:
-                    if self.pool[-1].done:
-                        if self.args.visualize or self.args.store:
-                            for barcode in self.pool[-1].barcodes:
-                                barcode.Draw(self.pool[-1].image)
-                        if self.args.print_results:
-                            self.print_result(self.pool[-1])
-                        if self.args.visualize:
-                            self.show_result(self.pool[-1])
-                        if self.args.store:
-                            self.store_result(self.pool[-1])
-                        self.pool[-1].reset()
-                    self.processor = self.pool.pop()
-                    self.processor.frame = self.frame
-                    self.processor.timestamp = timestamp
-                else:
-                    # No processor's available, we'll have to skip
-                    # this frame; you may want to print a warning
-                    # here to see whether you hit this case
+    def new_frame(self, frame):
+        self.frame += 1
+        timestamp = str(round(time.time() * 1000))
+        with self.lock:
+            if self.pool:
+                if self.pool[-1].done:
+                    if self.args.visualize or self.args.store:
+                        for barcode in self.pool[-1].barcodes:
+                            barcode.Draw(self.pool[-1].image)
                     if self.args.print_results:
-                        print(timestamp, self.frame, flush=True)
-                    self.processor = None
-        if self.processor:
-            self.processor.stream.write(buf)
+                        self.print_result(self.pool[-1])
+                    if self.args.visualize:
+                        self.show_result(self.pool[-1])
+                    if self.args.store:
+                        self.store_result(self.pool[-1])
+                    self.pool[-1].reset()
+                self.processor = self.pool.pop()
+                self.processor.frame = self.frame
+                self.processor.image = frame
+                self.processor.timestamp = timestamp
+                self.processor.event.set()
+            else:
+                if self.args.print_results:
+                    print(timestamp, self.frame, flush=True)
+                self.processor = None
 
     def flush(self):
         # When told to flush (this indicates end of recording), shut
@@ -276,7 +251,7 @@ class Visualizer(threading.Thread):
     -------
         run()
             Visualization main loop that shows the given image if its timestamp
-            is greater than the timestamp of currently shown image. This loop is
+            is greater than the timestamp of the currently shown image. This loop is
             terminated when ESC is pressed.
     """
 
@@ -313,20 +288,38 @@ def ParseCommandLineArguments():
     parser.add_argument('-iw', '--image-width', default=640, type=int)
     parser.add_argument('-ih', '--image-height', default=480, type=int)
     parser.add_argument('-f', '--fps', default=30, type=int)
+    parser.add_argument('-d', '--focus-distance', default=300, type=int)
     return parser.parse_args(sys.argv[1:])
+
+def focus(val):
+    value = (val << 4) & 0x3ff0
+    data1 = (value >> 8) & 0x3f
+    data2 = value & 0xf0
+    os.system("i2cset -y 6 0x0c %d %d" % (data1,data2))
+
+def gstreamer_pipeline (capture_width=1280, capture_height=720, display_width=1280, display_height=720, framerate=60, flip_method=0) :
+    return ('nvarguscamerasrc ! '
+    'video/x-raw(memory:NVMM), '
+    'width=(int)%d, height=(int)%d, '
+    'format=(string)NV12, framerate=(fraction)%d/1 ! '
+    'nvvidconv flip-method=%d ! '
+    'video/x-raw, width=(int)%d, height=(int)%d, format=(string)BGRx ! '
+    'videoconvert ! '
+    'video/x-raw, format=(string)BGR ! appsink'  % (capture_width,capture_height,framerate,flip_method,display_width,display_height))
 
 if __name__ == "__main__":
     args = ParseCommandLineArguments()
-
-    with picamera.PiCamera(resolution=(args.image_width, args.image_height), framerate=args.fps) as camera:
-        time.sleep(2)
+    cap = cv2.VideoCapture(gstreamer_pipeline(args.image_width, args.image_height, args.image_width, args.image_height, args.fps, 0), cv2.CAP_GSTREAMER)
+    if cap.isOpened():
+        focus(args.focus_distance)
         output = ProcessOutput(args)
-        camera.start_recording(output, format='mjpeg')
-        try:
-            while not output.done:
-                camera.wait_recording()
-        except KeyboardInterrupt:
-            pass
-        camera.stop_recording()
+        while not output.done:
+            # capture image
+            ret_val, image = cap.read()
+            if not ret_val:
+                continue
+            output.new_frame(image)
         output.flush()
+    else:
+        print('Unable to open camera')
 
