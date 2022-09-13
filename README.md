@@ -1,2 +1,2 @@
 # BarcodeDetection
-Barcode detection and decoding on Raspberry Pi.
+Barcode detection and decoding on NVIDIA Jetson Nano.
